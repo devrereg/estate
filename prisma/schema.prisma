@@ -1,0 +1,163 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../lib/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ── 참조 데이터 ──
+
+model Region {
+  id        String  @id              // "11680" (5자리 LAWD_CD)
+  name      String                   // "강남구"
+  city      String                   // "서울" | "경기" | "인천"
+  fullLabel String                   // "서울 강남구"
+  tier      Int?                     // 1=최상위, 2=상위, 3=중위, 4=하위
+
+  adjacenciesFrom RegionAdjacency[] @relation("FromRegion")
+  adjacenciesTo   RegionAdjacency[] @relation("ToRegion")
+  trades           Trade[]
+  rents            Rent[]
+  triggers         TriggerEvent[]
+  predictions      PredictionResult[]
+  monthlyStats     MonthlyRegionStat[]
+  apartments       BlueChipApartment[]
+}
+
+model RegionAdjacency {
+  id           Int    @id @default(autoincrement())
+  fromRegionId String
+  toRegionId   String
+  weight       Float  @default(1.0) // 1.0 = 직접 인접, 0.8 = 서울-경기 경계
+
+  fromRegion Region @relation("FromRegion", fields: [fromRegionId], references: [id])
+  toRegion   Region @relation("ToRegion", fields: [toRegionId], references: [id])
+
+  @@unique([fromRegionId, toRegionId])
+  @@index([fromRegionId])
+}
+
+model BlueChipApartment {
+  id       Int    @id @default(autoincrement())
+  name     String // "래미안원베일리"
+  regionId String
+  dong     String // "반포동"
+  district String // "서초구 반포동"
+
+  region   Region         @relation(fields: [regionId], references: [id])
+  triggers TriggerEvent[]
+
+  @@index([regionId])
+}
+
+// ── 수집 데이터 ──
+
+model Trade {
+  id          Int      @id @default(autoincrement())
+  regionId    String
+  dealYmd     String   // "202603"
+  aptName     String
+  dealAmount  Int      // 만원 단위
+  excArea     Float    // 전용면적
+  floor       Int?
+  dealDay     Int?
+  buildYear   Int?
+  collectedAt DateTime @default(now())
+
+  region Region @relation(fields: [regionId], references: [id])
+
+  @@index([regionId, dealYmd])
+  @@index([aptName, regionId])
+  @@index([dealYmd])
+}
+
+model Rent {
+  id          Int      @id @default(autoincrement())
+  regionId    String
+  dealYmd     String
+  aptName     String
+  rentType    String   // "전세" | "월세"
+  deposit     Int      // 보증금 (만원)
+  monthlyRent Int      @default(0)
+  excArea     Float
+  floor       Int?
+  dealDay     Int?
+  collectedAt DateTime @default(now())
+
+  region Region @relation(fields: [regionId], references: [id])
+
+  @@index([regionId, dealYmd])
+  @@index([aptName, regionId])
+}
+
+// ── 집계 데이터 ──
+
+model MonthlyRegionStat {
+  id            Int      @id @default(autoincrement())
+  regionId      String
+  dealYmd       String   // "202603"
+  tradeCount    Int      // 매매 건수
+  avgTradePrice Int      // 평균 매매가 (만원)
+  maxTradePrice Int      // 최고 매매가
+  rentCount     Int      // 전세 건수
+  avgRentDeposit Int     // 평균 전세 보증금
+  leaseToPrice  Float?   // 전세가율 (0.0 ~ 1.0)
+  computedAt    DateTime @default(now())
+
+  region Region @relation(fields: [regionId], references: [id])
+
+  @@unique([regionId, dealYmd])
+  @@index([dealYmd])
+}
+
+// ── 알고리즘 출력 ──
+
+model TriggerEvent {
+  id             Int      @id @default(autoincrement())
+  regionId       String
+  apartmentId    Int?
+  triggerType    String   // "ATH_90" | "PRICE_JUMP_5PCT"
+  triggerValue   Float    // 예: 0.93 (전고점 93%) 또는 0.07 (7% 상승)
+  referencePrice Int      // 기준가 (만원)
+  currentPrice   Int      // 현재가 (만원)
+  detectedAt     DateTime @default(now())
+
+  region    Region             @relation(fields: [regionId], references: [id])
+  apartment BlueChipApartment? @relation(fields: [apartmentId], references: [id])
+
+  @@index([regionId])
+  @@index([detectedAt])
+}
+
+model PredictionResult {
+  id              Int      @id @default(autoincrement())
+  regionId        String
+  triggerRegionId String   // 트리거 발생 지역
+  totalScore      Float    // 종합 점수 (0-100)
+  leaseScore      Float    // 전세가율 점수 (0-30)
+  volumeScore     Float    // 거래량 점수 (0-30)
+  proximityScore  Float    // 인접성 점수 (0-20)
+  priceGapScore   Float    // 가격차 점수 (0-20)
+  reasoning       String?  // JSON: 상세 설명
+  computedAt      DateTime @default(now())
+
+  region Region @relation(fields: [regionId], references: [id])
+
+  @@index([computedAt])
+  @@index([totalScore])
+}
+
+model CollectionJob {
+  id         Int       @id @default(autoincrement())
+  jobType    String    // "TRADE" | "RENT" | "FULL"
+  status     String    @default("PENDING") // "PENDING" | "RUNNING" | "COMPLETED" | "FAILED"
+  totalTasks Int       @default(0)
+  completed  Int       @default(0)
+  failed     Int       @default(0)
+  startedAt  DateTime?
+  finishedAt DateTime?
+  errorLog   String?
+  createdAt  DateTime  @default(now())
+}
