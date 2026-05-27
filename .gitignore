@@ -44,6 +44,7 @@ yarn-error.log*
 # temp / reference
 mcp-ref/
 pdf_content.txt
+estate-prod-reset.sql
 
 # vercel
 .vercel

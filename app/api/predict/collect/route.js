@@ -5,7 +5,7 @@ import { getLastNMonths, batchProcess } from '@/lib/utils';
 
 export const maxDuration = 60;
 
-const CHUNK_SIZE = 15;
+const CHUNK_SIZE = 8;
 
 export async function POST(request) {
   try {
@@ -90,9 +90,10 @@ export async function POST(request) {
             DEAL_YMD: task.month,
           });
           const items = parseTradeItems(data);
-          for (const item of items) {
-            await prisma.trade.create({
-              data: {
+          // FR: createMany로 네트워크 왕복을 items 건수 → 1회로 축소
+          if (items.length > 0) {
+            await prisma.trade.createMany({
+              data: items.map(item => ({
                 regionId: task.region.id,
                 dealYmd: task.month,
                 aptName: item.aptName,
@@ -101,7 +102,7 @@ export async function POST(request) {
                 floor: item.floor,
                 dealDay: item.dealDay,
                 buildYear: item.buildYear,
-              },
+              })),
             });
           }
         } else {
@@ -110,9 +111,10 @@ export async function POST(request) {
             DEAL_YMD: task.month,
           });
           const items = parseRentItems(data);
-          for (const item of items) {
-            await prisma.rent.create({
-              data: {
+          // FR: createMany로 네트워크 왕복을 items 건수 → 1회로 축소
+          if (items.length > 0) {
+            await prisma.rent.createMany({
+              data: items.map(item => ({
                 regionId: task.region.id,
                 dealYmd: task.month,
                 aptName: item.aptName,
@@ -122,28 +124,44 @@ export async function POST(request) {
                 excArea: item.excArea,
                 floor: item.floor,
                 dealDay: item.dealDay,
-              },
+              })),
             });
           }
         }
+        // FR: task 단위 즉시 마커 기록 — createMany 성공 직후 upsert
+        // 중간 타임아웃 시에도 완료된 task는 큐에서 제외됨
+        await upsertStatForTask(task);
         success++;
       } catch (err) {
         failed++;
         console.error(`Failed: ${task.region.id} ${task.month} ${task.type}:`, err.message);
       }
-    }, 5, 200);
+    }, 5, 0);
 
-    // 이 청크가 건드린 (region, month)에 대해 통계 갱신 + 처리 완료 마커 기록
-    // 성공/실패 불문하고 모든 task에 마커를 세팅: failed task도 재큐되지 않음
-    // (단, API 오류 task는 failed++ 후 재시도 없이 마킹 — 현재 요구사항대로)
-    const touchedByType = new Map(); // key: "regionId_month", value: { trade?, rent? }
-    for (const task of chunk) {
-      const key = `${task.region.id}_${task.month}`;
-      if (!touchedByType.has(key)) touchedByType.set(key, {});
-      if (task.type === 'TRADE') touchedByType.get(key).trade = true;
-      if (task.type === 'RENT') touchedByType.get(key).rent = true;
+    // 보정 패스: batchProcess가 끝난 뒤 이번 청크의 모든 (regionId, dealYmd) 페어를
+    // 한 번에 읽어 leaseToPrice만 재계산한다.
+    // upsertStatForTask 내부의 leaseToPrice 계산은 같은 파도에서 경합 시 stale 값을
+    // 읽을 수 있으나, 이 보정 패스는 두 task가 모두 커밋된 이후 순차 실행되므로
+    // 경합이 없어 정확한 값을 확정한다.
+    const chunkPairs = [
+      ...new Map(chunk.map(t => [`${t.region.id}_${t.month}`, { regionId: t.region.id, dealYmd: t.month }])).values(),
+    ];
+    if (chunkPairs.length > 0) {
+      const pairStats = await prisma.monthlyRegionStat.findMany({
+        where: {
+          OR: chunkPairs.map(p => ({ regionId: p.regionId, dealYmd: p.dealYmd })),
+        },
+        select: { regionId: true, dealYmd: true, avgTradePrice: true, avgRentDeposit: true },
+      });
+      for (const stat of pairStats) {
+        if (stat.avgTradePrice > 0 && stat.avgRentDeposit > 0) {
+          await prisma.monthlyRegionStat.update({
+            where: { regionId_dealYmd: { regionId: stat.regionId, dealYmd: stat.dealYmd } },
+            data: { leaseToPrice: stat.avgRentDeposit / stat.avgTradePrice },
+          });
+        }
+      }
     }
-    await computeStatsForPairs(touchedByType);
 
     // remainingAfter: DB 마커 재스캔으로 정확한 실측치 산출 (낙관적 추정 금지)
     const updatedStats = await prisma.monthlyRegionStat.findMany({
@@ -195,55 +213,53 @@ export async function POST(request) {
   }
 }
 
-// 처리된 (regionId, month)에 대해 통계 집계 + 처리 완료 마커 upsert
-// tradeFlag/rentFlag: 이번 청크에서 해당 타입을 처리했으면 true → 마커를 true로 갱신
-async function computeStatsForPairs(touchedByType) {
-  for (const [pair, flags] of touchedByType) {
-    const [regionId, dealYmd] = pair.split('_');
+// task 단위 즉시 마커 upsert: createMany 성공 직후 호출
+// TRADE task → 매매 통계 필드 + tradeProcessed 갱신, rentProcessed는 건드리지 않음
+// RENT task  → 전세 통계 필드 + rentProcessed 갱신, tradeProcessed는 건드리지 않음
+// MonthlyRegionStat은 (regionId, dealYmd) 유니크라 두 타입이 같은 row를 공유.
+// leaseToPrice는 양쪽 타입 모두 존재할 때만 의미 있으므로 두 타입 처리 후 재계산.
+async function upsertStatForTask(task) {
+  const { region, month: dealYmd, type } = task;
+  const regionId = region.id;
 
-    const [trades, rents] = await Promise.all([
-      prisma.trade.findMany({ where: { regionId, dealYmd } }),
-      prisma.rent.findMany({ where: { regionId, dealYmd, rentType: '전세' } }),
-    ]);
+  if (type === 'TRADE') {
+    const trades = await prisma.trade.findMany({ where: { regionId, dealYmd } });
+    const amounts = trades.map(t => t.dealAmount);
+    const avgTrade = amounts.length > 0
+      ? Math.round(amounts.reduce((a, b) => a + b, 0) / amounts.length) : 0;
+    const maxTrade = amounts.length > 0 ? Math.max(...amounts) : 0;
 
-    const tradeAmounts = trades.map(t => t.dealAmount);
-    const rentDeposits = rents.map(r => r.deposit);
-
-    const avgTrade = tradeAmounts.length > 0
-      ? Math.round(tradeAmounts.reduce((a, b) => a + b, 0) / tradeAmounts.length) : 0;
-    const maxTrade = tradeAmounts.length > 0 ? Math.max(...tradeAmounts) : 0;
-    const avgRent = rentDeposits.length > 0
-      ? Math.round(rentDeposits.reduce((a, b) => a + b, 0) / rentDeposits.length) : 0;
+    // leaseToPrice 재계산: 기존 rentProcessed가 true면 rent도 이미 있을 수 있음
+    const existing = await prisma.monthlyRegionStat.findUnique({
+      where: { regionId_dealYmd: { regionId, dealYmd } },
+      select: { avgRentDeposit: true, rentProcessed: true },
+    });
+    const avgRent = existing?.avgRentDeposit ?? 0;
     const leaseToPrice = (avgTrade > 0 && avgRent > 0) ? avgRent / avgTrade : null;
-
-    // 처리 완료 마커: 이번 청크에서 처리한 타입만 true로 set
-    // 기존 row가 있으면 해당 타입 마커만 덮어쓰고, 없으면 전체 create
-    const updateData = {
-      tradeCount: trades.length,
-      avgTradePrice: avgTrade,
-      maxTradePrice: maxTrade,
-      rentCount: rents.length,
-      avgRentDeposit: avgRent,
-      leaseToPrice,
-      ...(flags.trade && { tradeProcessed: true }),
-      ...(flags.rent && { rentProcessed: true }),
-    };
 
     await prisma.monthlyRegionStat.upsert({
       where: { regionId_dealYmd: { regionId, dealYmd } },
-      update: updateData,
-      create: {
-        regionId,
-        dealYmd,
-        tradeCount: trades.length,
-        avgTradePrice: avgTrade,
-        maxTradePrice: maxTrade,
-        rentCount: rents.length,
-        avgRentDeposit: avgRent,
-        leaseToPrice,
-        tradeProcessed: flags.trade ?? false,
-        rentProcessed: flags.rent ?? false,
-      },
+      update: { tradeCount: trades.length, avgTradePrice: avgTrade, maxTradePrice: maxTrade, leaseToPrice, tradeProcessed: true },
+      create: { regionId, dealYmd, tradeCount: trades.length, avgTradePrice: avgTrade, maxTradePrice: maxTrade, rentCount: 0, avgRentDeposit: 0, leaseToPrice: null, tradeProcessed: true, rentProcessed: false },
+    });
+  } else {
+    const rents = await prisma.rent.findMany({ where: { regionId, dealYmd, rentType: '전세' } });
+    const deposits = rents.map(r => r.deposit);
+    const avgRent = deposits.length > 0
+      ? Math.round(deposits.reduce((a, b) => a + b, 0) / deposits.length) : 0;
+
+    // leaseToPrice 재계산: 기존 tradeProcessed가 true면 trade도 이미 있을 수 있음
+    const existing = await prisma.monthlyRegionStat.findUnique({
+      where: { regionId_dealYmd: { regionId, dealYmd } },
+      select: { avgTradePrice: true, maxTradePrice: true, tradeProcessed: true },
+    });
+    const avgTrade = existing?.avgTradePrice ?? 0;
+    const leaseToPrice = (avgTrade > 0 && avgRent > 0) ? avgRent / avgTrade : null;
+
+    await prisma.monthlyRegionStat.upsert({
+      where: { regionId_dealYmd: { regionId, dealYmd } },
+      update: { rentCount: rents.length, avgRentDeposit: avgRent, leaseToPrice, rentProcessed: true },
+      create: { regionId, dealYmd, tradeCount: 0, avgTradePrice: 0, maxTradePrice: 0, rentCount: rents.length, avgRentDeposit: avgRent, leaseToPrice: null, tradeProcessed: false, rentProcessed: true },
     });
   }
 }
