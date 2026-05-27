@@ -40,39 +40,56 @@ export default function PredictPage() {
   const handleCollect = async (months = 6) => {
     setCollecting(true);
     setCollectMsg('데이터 수집 시작...');
-    try {
-      // 서울만 먼저 수집 (빠른 테스트)
-      const res = await fetch('/api/predict/collect', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: 'FULL', months }),
-      });
-      const data = await res.json();
-      if (data.status === 'COMPLETED') {
-        setCollectMsg(data.message);
-        setCollecting(false);
-        fetchStatus();
-        return;
-      }
-      setCollectMsg(`${data.message} (백그라운드 진행 중)`);
 
-      // 주기적으로 상태 확인
-      const interval = setInterval(async () => {
-        const statusRes = await fetch('/api/predict/status');
-        const statusData = await statusRes.json();
-        setStatus(statusData);
-        if (statusData.latestJob?.status === 'COMPLETED' || statusData.latestJob?.status === 'FAILED') {
-          clearInterval(interval);
-          setCollecting(false);
-          setCollectMsg(statusData.latestJob?.status === 'COMPLETED'
-            ? `수집 완료! (${statusData.counts.tradeCount}건 매매, ${statusData.counts.rentCount}건 전월세)`
-            : '수집 실패');
-          fetchStatus();
+    let jobId = null;
+    let totalSuccess = 0;
+    let totalFailed = 0;
+    let prevRemaining = null;
+
+    try {
+      while (true) {
+        const res = await fetch('/api/predict/collect', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ type: 'FULL', months, jobId }),
+        });
+        const data = await res.json();
+
+        if (data.error) {
+          setCollectMsg('오류: ' + data.error);
+          break;
         }
-      }, 5000);
+
+        jobId = data.jobId;
+        totalSuccess += data.success || 0;
+        totalFailed += data.failed || 0;
+
+        const done = data.total - data.remaining;
+        const pct = data.total > 0 ? Math.round((done / data.total) * 100) : 100;
+        setCollectMsg(`${done}/${data.total} (${pct}%) — ${data.message}`);
+
+        fetchStatus();
+
+        if (data.status === 'COMPLETED') {
+          setCollectMsg(`수집 완료! 누적 성공 ${totalSuccess}건, 실패 ${totalFailed}건`);
+          break;
+        }
+        if (data.processedThisCall === 0) {
+          setCollectMsg('진행 없음 — 중단');
+          break;
+        }
+        // 모든 task가 실패만 한 청크: remaining이 줄지 않으면 외부 API 영구 오류로 간주하고 중단
+        if (prevRemaining !== null && data.remaining >= prevRemaining) {
+          setCollectMsg(`진전 없음 — 중단 (외부 API 오류 가능, 실패 누적 ${totalFailed}건)`);
+          break;
+        }
+        prevRemaining = data.remaining;
+      }
     } catch (e) {
       setCollectMsg('오류: ' + e.message);
+    } finally {
       setCollecting(false);
+      fetchStatus();
     }
   };
 
