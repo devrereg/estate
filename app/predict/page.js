@@ -44,7 +44,6 @@ export default function PredictPage() {
     let jobId = null;
     let totalSuccess = 0;
     let totalFailed = 0;
-    let prevRemaining = null;
 
     try {
       while (true) {
@@ -78,12 +77,6 @@ export default function PredictPage() {
           setCollectMsg('진행 없음 — 중단');
           break;
         }
-        // 모든 task가 실패만 한 청크: remaining이 줄지 않으면 외부 API 영구 오류로 간주하고 중단
-        if (prevRemaining !== null && data.remaining >= prevRemaining) {
-          setCollectMsg(`진전 없음 — 중단 (외부 API 오류 가능, 실패 누적 ${totalFailed}건)`);
-          break;
-        }
-        prevRemaining = data.remaining;
       }
     } catch (e) {
       setCollectMsg('오류: ' + e.message);

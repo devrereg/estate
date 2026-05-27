@@ -95,16 +95,20 @@ model Rent {
 // ── 집계 데이터 ──
 
 model MonthlyRegionStat {
-  id            Int      @id @default(autoincrement())
-  regionId      String
-  dealYmd       String   // "202603"
-  tradeCount    Int      // 매매 건수
-  avgTradePrice Int      // 평균 매매가 (만원)
-  maxTradePrice Int      // 최고 매매가
-  rentCount     Int      // 전세 건수
-  avgRentDeposit Int     // 평균 전세 보증금
-  leaseToPrice  Float?   // 전세가율 (0.0 ~ 1.0)
-  computedAt    DateTime @default(now())
+  id             Int      @id @default(autoincrement())
+  regionId       String
+  dealYmd        String   // "202603"
+  tradeCount     Int      // 매매 건수
+  avgTradePrice  Int      // 평균 매매가 (만원)
+  maxTradePrice  Int      // 최고 매매가
+  rentCount      Int      // 전세 건수
+  avgRentDeposit Int      // 평균 전세 보증금
+  leaseToPrice   Float?   // 전세가율 (0.0 ~ 1.0)
+  // 처리 완료 마커: 빈 결과(0건)인 경우에도 API 호출했음을 기록 — 무한 재큐 방지
+  // 참고: 28720 옹진군 등 7개 지역은 LAWD_CD 미매핑으로 항상 0건이나, 마커 덕분에 큐 무한루프 없음
+  tradeProcessed Boolean  @default(false)
+  rentProcessed  Boolean  @default(false)
+  computedAt     DateTime @default(now())
 
   region Region @relation(fields: [regionId], references: [id])
 
