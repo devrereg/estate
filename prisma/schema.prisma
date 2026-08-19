@@ -5,6 +5,7 @@ generator client {
 
 datasource db {
   provider = "postgresql"
+  schemas  = ["estate"]
 }
 
 // ── 참조 데이터 ──
@@ -24,6 +25,8 @@ model Region {
   predictions      PredictionResult[]
   monthlyStats     MonthlyRegionStat[]
   apartments       BlueChipApartment[]
+
+  @@schema("estate")
 }
 
 model RegionAdjacency {
@@ -37,6 +40,7 @@ model RegionAdjacency {
 
   @@unique([fromRegionId, toRegionId])
   @@index([fromRegionId])
+  @@schema("estate")
 }
 
 model BlueChipApartment {
@@ -50,6 +54,7 @@ model BlueChipApartment {
   triggers TriggerEvent[]
 
   @@index([regionId])
+  @@schema("estate")
 }
 
 // ── 수집 데이터 ──
@@ -71,6 +76,7 @@ model Trade {
   @@index([regionId, dealYmd])
   @@index([aptName, regionId])
   @@index([dealYmd])
+  @@schema("estate")
 }
 
 model Rent {
@@ -90,6 +96,7 @@ model Rent {
 
   @@index([regionId, dealYmd])
   @@index([aptName, regionId])
+  @@schema("estate")
 }
 
 // ── 집계 데이터 ──
@@ -114,6 +121,7 @@ model MonthlyRegionStat {
 
   @@unique([regionId, dealYmd])
   @@index([dealYmd])
+  @@schema("estate")
 }
 
 // ── 알고리즘 출력 ──
@@ -133,6 +141,7 @@ model TriggerEvent {
 
   @@index([regionId])
   @@index([detectedAt])
+  @@schema("estate")
 }
 
 model PredictionResult {
@@ -151,6 +160,7 @@ model PredictionResult {
 
   @@index([computedAt])
   @@index([totalScore])
+  @@schema("estate")
 }
 
 model CollectionJob {
@@ -164,4 +174,6 @@ model CollectionJob {
   finishedAt DateTime?
   errorLog   String?
   createdAt  DateTime  @default(now())
+
+  @@schema("estate")
 }
