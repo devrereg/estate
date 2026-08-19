@@ -5,7 +5,13 @@ import { SEOUL_ADJACENCY, CROSS_BOUNDARY } from '../lib/constants/adjacencyGraph
 import { BLUE_CHIP_APARTMENTS } from '../lib/constants/blueChipApartments.js';
 
 const connectionString = process.env.DATABASE_URL || "postgresql://estate:estate_dev@localhost:5433/estate";
-const adapter = new PrismaPg({ connectionString });
+const adapter = new PrismaPg(
+  {
+    connectionString,
+    ssl: process.env.DATABASE_SSL === "true" ? { rejectUnauthorized: false } : undefined,
+  },
+  process.env.DATABASE_SCHEMA ? { schema: process.env.DATABASE_SCHEMA } : undefined,
+);
 const prisma = new PrismaClient({ adapter });
 
 async function main() {
